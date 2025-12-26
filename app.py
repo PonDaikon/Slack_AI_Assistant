@@ -56,10 +56,12 @@ def generate_reply_suggestions(message_text: str) -> str:
         return "申し訳ありません。返信案の生成に失敗しました。"
 
 
-@slack_app.action("generate_reply_suggestions")
+@slack_app.shortcut("generate_reply_suggestions")
 def handle_message_action(ack, body, client):
     """
-    Message Actionで「返信案を生成」がクリックされた時の処理
+    Message Shortcutで「AI返信生成」がクリックされた時の処理
+    
+    @slack_app.shortcut() を使用してMessage Shortcutを処理
     """
     ack()
     
@@ -69,15 +71,19 @@ def handle_message_action(ack, body, client):
         channel_id = body.get("channel", {}).get("id", "")
         user_id = body.get("user", {}).get("id", "")
         
+        logger.info(f"Message shortcut triggered - Text: {message_text}, Channel: {channel_id}, User: {user_id}")
+        
         if not message_text or not channel_id or not user_id:
-            logger.error("Missing required fields in action body")
+            logger.error("Missing required fields in shortcut body")
             return
         
         # 返信案を生成（スレッドで実行）
         def post_suggestions():
             try:
+                logger.info("Generating reply suggestions...")
                 suggestions = generate_reply_suggestions(message_text)
                 
+                logger.info("Posting ephemeral message...")
                 # Ephemeral Messageで返信案を投稿
                 # （クリックしたユーザーにだけ表示される）
                 client.chat_postEphemeral(
@@ -85,6 +91,7 @@ def handle_message_action(ack, body, client):
                     user=user_id,
                     text=f"💡 *返信案*\n\n{suggestions}"
                 )
+                logger.info("Ephemeral message posted successfully")
             except Exception as e:
                 logger.error(f"Error posting suggestions: {e}")
                 try:
