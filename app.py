@@ -63,34 +63,44 @@ def handle_message_action(ack, body, client):
     """
     ack()
     
-    # メッセージ情報を取得
-    message_text = body["message"]["text"]
-    channel_id = body["channel"]["id"]
-    user_id = body["user"]["id"]
-    
-    # 返信案を生成（スレッドで実行）
-    def post_suggestions():
-        try:
-            suggestions = generate_reply_suggestions(message_text)
-            
-            # Ephemeral Messageで返信案を投稿
-            # （クリックしたユーザーにだけ表示される）
-            client.chat_postEphemeral(
-                channel=channel_id,
-                user=user_id,
-                text=f"💡 *返信案*\n\n{suggestions}"
-            )
-        except Exception as e:
-            logger.error(f"Error posting suggestions: {e}")
-            client.chat_postEphemeral(
-                channel=channel_id,
-                user=user_id,
-                text="申し訳ありません。返信案の生成に失敗しました。"
-            )
-    
-    thread = Thread(target=post_suggestions)
-    thread.daemon = True
-    thread.start()
+    try:
+        # メッセージ情報を取得
+        message_text = body.get("message", {}).get("text", "")
+        channel_id = body.get("channel", {}).get("id", "")
+        user_id = body.get("user", {}).get("id", "")
+        
+        if not message_text or not channel_id or not user_id:
+            logger.error("Missing required fields in action body")
+            return
+        
+        # 返信案を生成（スレッドで実行）
+        def post_suggestions():
+            try:
+                suggestions = generate_reply_suggestions(message_text)
+                
+                # Ephemeral Messageで返信案を投稿
+                # （クリックしたユーザーにだけ表示される）
+                client.chat_postEphemeral(
+                    channel=channel_id,
+                    user=user_id,
+                    text=f"💡 *返信案*\n\n{suggestions}"
+                )
+            except Exception as e:
+                logger.error(f"Error posting suggestions: {e}")
+                try:
+                    client.chat_postEphemeral(
+                        channel=channel_id,
+                        user=user_id,
+                        text="申し訳ありません。返信案の生成に失敗しました。"
+                    )
+                except Exception as inner_e:
+                    logger.error(f"Error posting error message: {inner_e}")
+        
+        thread = Thread(target=post_suggestions)
+        thread.daemon = True
+        thread.start()
+    except Exception as e:
+        logger.error(f"Error in handle_message_action: {e}")
 
 
 @flask_app.route("/slack/events", methods=["POST"])
