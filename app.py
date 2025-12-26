@@ -56,33 +56,37 @@ def generate_reply_suggestions(message_text: str) -> str:
         return "申し訳ありません。返信案の生成に失敗しました。"
 
 
-@slack_app.message("")
-def handle_message(message, say, client):
+@slack_app.action("generate_reply_suggestions")
+def handle_message_action(ack, body, client):
     """
-    すべてのメッセージを処理し、返信案をスレッドで提示する
+    Message Actionで「返信案を生成」がクリックされた時の処理
     """
-    # ボット自身のメッセージは無視
-    if message.get("bot_id"):
-        return
+    ack()
     
-    # メッセージテキストを取得
-    message_text = message.get("text", "")
-    if not message_text:
-        return
+    # メッセージ情報を取得
+    message_text = body["message"]["text"]
+    channel_id = body["channel"]["id"]
+    user_id = body["user"]["id"]
     
-    # 返信案を生成（スレッドで実行して応答を遅延させない）
+    # 返信案を生成（スレッドで実行）
     def post_suggestions():
         try:
             suggestions = generate_reply_suggestions(message_text)
             
-            # スレッドに返信案を投稿
-            client.chat_postMessage(
-                channel=message["channel"],
-                thread_ts=message["ts"],
+            # Ephemeral Messageで返信案を投稿
+            # （クリックしたユーザーにだけ表示される）
+            client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
                 text=f"💡 *返信案*\n\n{suggestions}"
             )
         except Exception as e:
             logger.error(f"Error posting suggestions: {e}")
+            client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text="申し訳ありません。返信案の生成に失敗しました。"
+            )
     
     thread = Thread(target=post_suggestions)
     thread.daemon = True
