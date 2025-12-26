@@ -136,8 +136,9 @@ def handle_message_action(ack, body, client):
     """
     Message Shortcutで「AI返信生成」がクリックされた時の処理
     
-    通常のメッセージとして投稿し、ボタンクリックで削除可能
-    120秒後に自動削除
+    スレッド内のメッセージ → スレッド内に投稿
+    スレッド外のメッセージ → スレッド外に投稿
+    ボタンクリックで削除可能、120秒後に自動削除
     """
     ack()
     
@@ -174,19 +175,34 @@ def handle_message_action(ack, body, client):
                 
                 logger.info("Posting message...")
                 
-                # 通常のメッセージとして投稿（スレッド外）
-                # thread_tsが存在してもスレッド外に投稿
-                response = client.chat_postMessage(
-                    channel=channel_id,
-                    blocks=blocks,
-                    text="💡 返信案"  # フォールバックテキスト
-                )
+                # スレッド判定
+                # thread_tsが存在する場合 = スレッド内のメッセージ
+                # thread_tsが存在しない場合 = スレッド外のメッセージ
+                
+                if thread_ts:
+                    # スレッド内のメッセージの場合、スレッド内に投稿
+                    logger.info(f"Posting to thread: {thread_ts}")
+                    response = client.chat_postMessage(
+                        channel=channel_id,
+                        thread_ts=thread_ts,
+                        blocks=blocks,
+                        text="💡 返信案"  # フォールバックテキスト
+                    )
+                else:
+                    # スレッド外のメッセージの場合、スレッド外に投稿
+                    logger.info("Posting to channel (not in thread)")
+                    response = client.chat_postMessage(
+                        channel=channel_id,
+                        blocks=blocks,
+                        text="💡 返信案"  # フォールバックテキスト
+                    )
                 
                 # メッセージ情報を保存（削除用）
                 message_tracking[message_id] = {
                     "channel": channel_id,
                     "ts": response.get("ts"),
-                    "user": user_id
+                    "user": user_id,
+                    "thread_ts": thread_ts
                 }
                 
                 logger.info(f"Message posted successfully: {response.get('ts')}")
@@ -202,10 +218,17 @@ def handle_message_action(ack, body, client):
             except Exception as e:
                 logger.error(f"Error posting suggestions: {e}")
                 try:
-                    client.chat_postMessage(
-                        channel=channel_id,
-                        text="申し訳ありません。返信案の生成に失敗しました。"
-                    )
+                    if thread_ts:
+                        client.chat_postMessage(
+                            channel=channel_id,
+                            thread_ts=thread_ts,
+                            text="申し訳ありません。返信案の生成に失敗しました。"
+                        )
+                    else:
+                        client.chat_postMessage(
+                            channel=channel_id,
+                            text="申し訳ありません。返信案の生成に失敗しました。"
+                        )
                 except Exception as inner_e:
                     logger.error(f"Error posting error message: {inner_e}")
         
@@ -228,7 +251,6 @@ def handle_close_button(ack, body, client):
     try:
         message_id = body.get("actions", [{}])[0].get("value")
         user_id = body.get("user", {}).get("id")
-        channel_id = body.get("channel", {}).get("id")
         
         logger.info(f"Close button clicked: {message_id} by user {user_id}")
         
