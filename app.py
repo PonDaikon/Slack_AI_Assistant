@@ -28,9 +28,6 @@ model = genai.GenerativeModel("gemini-2.0-flash")
 # Flask リクエストハンドラー
 handler = SlackRequestHandler(slack_app)
 
-# メッセージ追跡用（削除用）
-message_tracking = {}
-
 
 def generate_reply_suggestions(message_text: str) -> str:
     """
@@ -61,13 +58,12 @@ def generate_reply_suggestions(message_text: str) -> str:
         return "申し訳ありません。返信案の生成に失敗しました。"
 
 
-def create_reply_suggestions_blocks(suggestions_text: str, message_id: str) -> list:
+def create_reply_suggestions_blocks(suggestions_text: str) -> list:
     """
     Block Kitを使用して返信案ブロックを作成
     
     Args:
         suggestions_text: 生成された返信案のテキスト
-        message_id: メッセージID（削除用）
         
     Returns:
         Block Kitブロックのリスト
@@ -87,48 +83,9 @@ def create_reply_suggestions_blocks(suggestions_text: str, message_id: str) -> l
                 "type": "mrkdwn",
                 "text": suggestions_text
             }
-        },
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "閉じる",
-                        "emoji": True
-                    },
-                    "value": message_id,
-                    "action_id": "close_suggestions_button"
-                }
-            ]
         }
     ]
     return blocks
-
-
-def delete_message_after_delay(client, channel_id, message_ts, delay_seconds=120):
-    """
-    指定時間後にメッセージを削除する
-    
-    Args:
-        client: Slack APIクライアント
-        channel_id: チャンネルID
-        message_ts: メッセージのタイムスタンプ
-        delay_seconds: 削除までの遅延時間（秒）
-    """
-    try:
-        logger.info(f"Scheduled message deletion in {delay_seconds} seconds: {message_ts}")
-        time.sleep(delay_seconds)
-        
-        # メッセージを削除
-        client.chat_delete(
-            channel=channel_id,
-            ts=message_ts
-        )
-        logger.info(f"Message {message_ts} deleted successfully")
-    except Exception as e:
-        logger.error(f"Error in delete_message_after_delay: {e}")
 
 
 @slack_app.shortcut("generate_reply_suggestions")
@@ -136,9 +93,9 @@ def handle_message_action(ack, body, client):
     """
     Message Shortcutで「AI返信生成」がクリックされた時の処理
     
+    Ephemeral Messageで返信案を表示
     スレッド内のメッセージ → スレッド内に投稿
     スレッド外のメッセージ → スレッド外に投稿
-    ボタンクリックで削除可能、120秒後に自動削除
     """
     ack()
     
@@ -161,9 +118,6 @@ def handle_message_action(ack, body, client):
             logger.error("Missing required fields in shortcut body")
             return
         
-        # メッセージID生成（削除用）
-        message_id = f"{channel_id}_{message_ts}_{int(time.time())}"
-        
         # 返信案を生成（スレッドで実行）
         def post_suggestions():
             try:
@@ -171,9 +125,9 @@ def handle_message_action(ack, body, client):
                 suggestions = generate_reply_suggestions(message_text)
                 
                 # Block Kitブロックを作成
-                blocks = create_reply_suggestions_blocks(suggestions, message_id)
+                blocks = create_reply_suggestions_blocks(suggestions)
                 
-                logger.info("Posting message...")
+                logger.info("Posting ephemeral message...")
                 
                 # スレッド判定
                 # thread_tsが存在する場合 = スレッド内のメッセージ
@@ -182,51 +136,37 @@ def handle_message_action(ack, body, client):
                 if thread_ts:
                     # スレッド内のメッセージの場合、スレッド内に投稿
                     logger.info(f"Posting to thread: {thread_ts}")
-                    response = client.chat_postMessage(
+                    client.chat_postEphemeral(
                         channel=channel_id,
+                        user=user_id,
                         thread_ts=thread_ts,
-                        blocks=blocks,
-                        text="💡 返信案"  # フォールバックテキスト
+                        blocks=blocks
                     )
                 else:
                     # スレッド外のメッセージの場合、スレッド外に投稿
                     logger.info("Posting to channel (not in thread)")
-                    response = client.chat_postMessage(
+                    client.chat_postEphemeral(
                         channel=channel_id,
-                        blocks=blocks,
-                        text="💡 返信案"  # フォールバックテキスト
+                        user=user_id,
+                        blocks=blocks
                     )
                 
-                # メッセージ情報を保存（削除用）
-                message_tracking[message_id] = {
-                    "channel": channel_id,
-                    "ts": response.get("ts"),
-                    "user": user_id,
-                    "thread_ts": thread_ts
-                }
-                
-                logger.info(f"Message posted successfully: {response.get('ts')}")
-                
-                # 120秒後に自動削除
-                delete_thread = Thread(
-                    target=delete_message_after_delay,
-                    args=(client, channel_id, response.get("ts"), 120)
-                )
-                delete_thread.daemon = True
-                delete_thread.start()
+                logger.info("Ephemeral message posted successfully")
                 
             except Exception as e:
                 logger.error(f"Error posting suggestions: {e}")
                 try:
                     if thread_ts:
-                        client.chat_postMessage(
+                        client.chat_postEphemeral(
                             channel=channel_id,
+                            user=user_id,
                             thread_ts=thread_ts,
                             text="申し訳ありません。返信案の生成に失敗しました。"
                         )
                     else:
-                        client.chat_postMessage(
+                        client.chat_postEphemeral(
                             channel=channel_id,
+                            user=user_id,
                             text="申し訳ありません。返信案の生成に失敗しました。"
                         )
                 except Exception as inner_e:
@@ -237,47 +177,6 @@ def handle_message_action(ack, body, client):
         thread.start()
     except Exception as e:
         logger.error(f"Error in handle_message_action: {e}")
-
-
-@slack_app.action("close_suggestions_button")
-def handle_close_button(ack, body, client):
-    """
-    「閉じる」ボタンがクリックされた時の処理
-    
-    ボタンをクリックしたら即座にメッセージを削除
-    """
-    ack()
-    
-    try:
-        message_id = body.get("actions", [{}])[0].get("value")
-        user_id = body.get("user", {}).get("id")
-        
-        logger.info(f"Close button clicked: {message_id} by user {user_id}")
-        
-        # メッセージ情報を取得
-        if message_id in message_tracking:
-            msg_info = message_tracking[message_id]
-            logger.info(f"Message tracked: {msg_info}")
-            
-            try:
-                # メッセージを削除
-                client.chat_delete(
-                    channel=msg_info["channel"],
-                    ts=msg_info["ts"]
-                )
-                
-                logger.info(f"Message {message_id} deleted successfully")
-                
-                # メッセージ情報を削除
-                del message_tracking[message_id]
-                
-            except Exception as e:
-                logger.error(f"Error deleting message: {e}")
-        else:
-            logger.warning(f"Message {message_id} not found in tracking")
-            
-    except Exception as e:
-        logger.error(f"Error in handle_close_button: {e}")
 
 
 @flask_app.route("/slack/events", methods=["POST"])
