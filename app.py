@@ -107,7 +107,7 @@ def create_reply_suggestions_blocks(suggestions_text: str, message_id: str) -> l
     return blocks
 
 
-def delete_message_after_delay(client, channel_id, message_ts, user_id, delay_seconds=120):
+def delete_message_after_delay(client, channel_id, message_ts, delay_seconds=120):
     """
     指定時間後にメッセージを削除する
     
@@ -115,16 +115,18 @@ def delete_message_after_delay(client, channel_id, message_ts, user_id, delay_se
         client: Slack APIクライアント
         channel_id: チャンネルID
         message_ts: メッセージのタイムスタンプ
-        user_id: ユーザーID
         delay_seconds: 削除までの遅延時間（秒）
     """
     try:
         logger.info(f"Scheduled message deletion in {delay_seconds} seconds: {message_ts}")
         time.sleep(delay_seconds)
         
-        # Ephemeral Messageは削除できないため、ここでは何もしない
-        # Ephemeral Messageは自動的に消える
-        logger.info(f"Message {message_ts} would be deleted (Ephemeral messages auto-delete)")
+        # メッセージを削除
+        client.chat_delete(
+            channel=channel_id,
+            ts=message_ts
+        )
+        logger.info(f"Message {message_ts} deleted successfully")
     except Exception as e:
         logger.error(f"Error in delete_message_after_delay: {e}")
 
@@ -134,7 +136,7 @@ def handle_message_action(ack, body, client):
     """
     Message Shortcutで「AI返信生成」がクリックされた時の処理
     
-    スレッド内での使用に対応し、Block Kitで返信案を表示
+    通常のメッセージとして投稿し、ボタンクリックで削除可能
     120秒後に自動削除
     """
     ack()
@@ -170,43 +172,29 @@ def handle_message_action(ack, body, client):
                 # Block Kitブロックを作成
                 blocks = create_reply_suggestions_blocks(suggestions, message_id)
                 
-                logger.info("Posting ephemeral message...")
+                logger.info("Posting message...")
                 
-                # スレッド判定
-                # thread_tsが存在する場合 = スレッド内のメッセージ
-                # thread_tsが存在しない場合 = スレッド外のメッセージ
-                
-                if thread_ts:
-                    # スレッド内のメッセージの場合、スレッド内に投稿
-                    logger.info(f"Posting to thread: {thread_ts}")
-                    response = client.chat_postEphemeral(
-                        channel=channel_id,
-                        user=user_id,
-                        thread_ts=thread_ts,
-                        blocks=blocks
-                    )
-                else:
-                    # スレッド外のメッセージの場合、スレッド外に投稿
-                    logger.info("Posting to channel (not in thread)")
-                    response = client.chat_postEphemeral(
-                        channel=channel_id,
-                        user=user_id,
-                        blocks=blocks
-                    )
+                # 通常のメッセージとして投稿（スレッド外）
+                # thread_tsが存在してもスレッド外に投稿
+                response = client.chat_postMessage(
+                    channel=channel_id,
+                    blocks=blocks,
+                    text="💡 返信案"  # フォールバックテキスト
+                )
                 
                 # メッセージ情報を保存（削除用）
                 message_tracking[message_id] = {
                     "channel": channel_id,
-                    "user": user_id,
-                    "thread_ts": thread_ts
+                    "ts": response.get("ts"),
+                    "user": user_id
                 }
                 
-                logger.info("Ephemeral message posted successfully")
+                logger.info(f"Message posted successfully: {response.get('ts')}")
                 
-                # 120秒後に自動削除（Ephemeral Messageなので自動的に消える）
+                # 120秒後に自動削除
                 delete_thread = Thread(
                     target=delete_message_after_delay,
-                    args=(client, channel_id, response.get("ts"), user_id, 120)
+                    args=(client, channel_id, response.get("ts"), 120)
                 )
                 delete_thread.daemon = True
                 delete_thread.start()
@@ -214,19 +202,10 @@ def handle_message_action(ack, body, client):
             except Exception as e:
                 logger.error(f"Error posting suggestions: {e}")
                 try:
-                    if thread_ts:
-                        client.chat_postEphemeral(
-                            channel=channel_id,
-                            user=user_id,
-                            thread_ts=thread_ts,
-                            text="申し訳ありません。返信案の生成に失敗しました。"
-                        )
-                    else:
-                        client.chat_postEphemeral(
-                            channel=channel_id,
-                            user=user_id,
-                            text="申し訳ありません。返信案の生成に失敗しました。"
-                        )
+                    client.chat_postMessage(
+                        channel=channel_id,
+                        text="申し訳ありません。返信案の生成に失敗しました。"
+                    )
                 except Exception as inner_e:
                     logger.error(f"Error posting error message: {inner_e}")
         
@@ -249,6 +228,7 @@ def handle_close_button(ack, body, client):
     try:
         message_id = body.get("actions", [{}])[0].get("value")
         user_id = body.get("user", {}).get("id")
+        channel_id = body.get("channel", {}).get("id")
         
         logger.info(f"Close button clicked: {message_id} by user {user_id}")
         
@@ -257,31 +237,20 @@ def handle_close_button(ack, body, client):
             msg_info = message_tracking[message_id]
             logger.info(f"Message tracked: {msg_info}")
             
-            # Ephemeral Messageは削除できないため、
-            # ユーザーへの確認メッセージを表示
             try:
-                channel_id = msg_info["channel"]
-                thread_ts = msg_info["thread_ts"]
+                # メッセージを削除
+                client.chat_delete(
+                    channel=msg_info["channel"],
+                    ts=msg_info["ts"]
+                )
                 
-                if thread_ts:
-                    client.chat_postEphemeral(
-                        channel=channel_id,
-                        user=user_id,
-                        thread_ts=thread_ts,
-                        text="✓ 返信案を閉じました"
-                    )
-                else:
-                    client.chat_postEphemeral(
-                        channel=channel_id,
-                        user=user_id,
-                        text="✓ 返信案を閉じました"
-                    )
+                logger.info(f"Message {message_id} deleted successfully")
                 
                 # メッセージ情報を削除
                 del message_tracking[message_id]
-                logger.info(f"Message {message_id} closed")
+                
             except Exception as e:
-                logger.error(f"Error posting close confirmation: {e}")
+                logger.error(f"Error deleting message: {e}")
         else:
             logger.warning(f"Message {message_id} not found in tracking")
             
